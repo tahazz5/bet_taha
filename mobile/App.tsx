@@ -1,21 +1,28 @@
 import React, { useMemo, useState } from 'react';
-import { Animated, Platform, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Alert, Platform, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
+
+type Pick = 'home' | 'draw' | 'away';
+type Tab = 'matches' | 'tickets' | 'friends';
 
 type Player = {
   id: number;
   name: string;
   balance: number;
+  role: string;
 };
 
 type Match = {
   id: string;
+  league: string;
   home: string;
   away: string;
   date: string;
-  odds: { home: number; draw: number; away: number };
+  bookmaker: string;
+  updatedAt: string;
+  odds: Record<Pick, number>;
   status: 'upcoming' | 'settled';
-  result: 'home' | 'draw' | 'away' | null;
+  result: Pick | null;
 };
 
 type Bet = {
@@ -23,59 +30,63 @@ type Bet = {
   playerId: number;
   playerName: string;
   matchId: string;
-  home: string;
-  away: string;
-  selection: 'home' | 'draw' | 'away';
+  label: string;
+  selection: Pick;
   stake: number;
+  odds: number;
+  potentialReturn: number;
   result: 'pending' | 'won' | 'lost';
 };
 
-type BetSelection = 'home' | 'draw' | 'away';
+const CURRENCY = 'MAD';
+const STARTING_BALANCE = 500;
+const ENTRY_FEE = 50;
+const STAKES = [10, 25, 50, 100];
+const ODDS_URL = Platform.OS === 'web'
+  ? '/api/odds?sport=soccer_epl&region=eu'
+  : 'http://localhost:8001/api/odds?sport=soccer_epl&region=eu';
 
-const STARTING_BANKROLL = 1000;
 const INITIAL_PLAYERS: Player[] = [
-  { id: 1, name: 'You', balance: STARTING_BANKROLL },
-  { id: 2, name: 'Mina', balance: STARTING_BANKROLL },
-  { id: 3, name: 'Leo', balance: STARTING_BANKROLL },
+  { id: 1, name: 'Taha', balance: STARTING_BALANCE, role: 'Host' },
+  { id: 2, name: 'Mina', balance: STARTING_BALANCE, role: 'Invitee' },
+  { id: 3, name: 'Yassine', balance: STARTING_BALANCE, role: 'Invitee' },
 ];
 
-const INITIAL_MATCHES: Match[] = [
-  { id: 'm1', home: 'Liverpool', away: 'Arsenal', date: 'Tonight • 20:00', odds: { home: 1.83, draw: 3.6, away: 4.2 }, status: 'upcoming', result: null },
-  { id: 'm2', home: 'Inter Milan', away: 'Napoli', date: 'Tomorrow • 19:45', odds: { home: 2.05, draw: 3.3, away: 3.5 }, status: 'upcoming', result: null },
-  { id: 'm3', home: 'Real Madrid', away: 'Villarreal', date: 'Friday • 20:30', odds: { home: 1.42, draw: 4.7, away: 6.8 }, status: 'upcoming', result: null },
-  { id: 'm4', home: 'Bayern Munich', away: 'Borussia Dortmund', date: 'Sunday • 17:30', odds: { home: 1.55, draw: 4.1, away: 5.8 }, status: 'upcoming', result: null },
-  { id: 'm5', home: 'PSG', away: 'Marseille', date: 'Sunday • 20:45', odds: { home: 1.68, draw: 3.9, away: 4.8 }, status: 'upcoming', result: null },
-];
+const money = (value: number) => `${Math.round(value)} ${CURRENCY}`;
 
-const STAKE_OPTIONS = [10, 25, 50];
-const ODDS_API_KEY = process.env.EXPO_PUBLIC_ODDS_API_KEY ?? '';
-const ODDS_API_URL = Platform.OS === 'web'
-  ? (typeof window !== 'undefined' && window.location?.origin ? `${window.location.origin}/api/odds` : '/api/odds')
-  : 'http://localhost:8001/api/odds';
-
-const formatKickoff = (isoDate: string) => {
-  const date = new Date(isoDate);
-  if (Number.isNaN(date.getTime())) return 'Today';
-  return `${date.toLocaleDateString('en', { weekday: 'short' })} • ${date.toLocaleTimeString('en', { hour: 'numeric', minute: '2-digit' })}`;
+const pickLabel = (pick: Pick) => {
+  if (pick === 'home') return 'Home';
+  if (pick === 'away') return 'Away';
+  return 'Draw';
 };
 
-const toMatchFromApi = (event: any): Match | null => {
+const formatDate = (value?: string) => {
+  const date = new Date(value ?? '');
+  if (Number.isNaN(date.getTime())) return 'Live schedule';
+  return `${date.toLocaleDateString('en', { weekday: 'short' })} ${date.toLocaleTimeString('en', { hour: 'numeric', minute: '2-digit' })}`;
+};
+
+const mapApiMatch = (event: any): Match | null => {
   if (!event?.home_team || !event?.away_team) return null;
 
-  const bookmaker = event.bookmakers?.find((entry: any) => entry?.markets?.some((market: any) => market?.key === 'h2h'));
+  const bookmaker = event.bookmakers?.find((book: any) => book?.markets?.some((market: any) => market?.key === 'h2h'));
   const market = bookmaker?.markets?.find((entry: any) => entry?.key === 'h2h');
   const outcomes = market?.outcomes ?? [];
-  const outcomeMap = Object.fromEntries(outcomes.map((outcome: any) => [outcome.name?.toLowerCase?.() ?? '', outcome.price]));
+  const prices = Object.fromEntries(outcomes.map((outcome: any) => [String(outcome.name ?? '').toLowerCase(), Number(outcome.price)]));
 
-  const home = outcomeMap[event.home_team.toLowerCase()] ?? outcomeMap['home'] ?? 1.8;
-  const draw = outcomeMap['draw'] ?? 3.5;
-  const away = outcomeMap[event.away_team.toLowerCase()] ?? outcomeMap['away'] ?? 4.2;
+  const home = prices[event.home_team.toLowerCase()];
+  const draw = prices.draw;
+  const away = prices[event.away_team.toLowerCase()];
+  if (!home || !draw || !away) return null;
 
   return {
-    id: `${event.id ?? event.home_team}-${event.away_team}`,
+    id: event.id ?? `${event.home_team}-${event.away_team}`,
+    league: event.sport_title ?? 'Football',
     home: event.home_team,
     away: event.away_team,
-    date: formatKickoff(event.commence_time),
+    date: formatDate(event.commence_time),
+    bookmaker: bookmaker?.title ?? 'Bookmaker',
+    updatedAt: formatDate(bookmaker?.last_update ?? market?.last_update),
     odds: { home, draw, away },
     status: 'upcoming',
     result: null,
@@ -83,110 +94,89 @@ const toMatchFromApi = (event: any): Match | null => {
 };
 
 export default function App() {
-  const [players, setPlayers] = useState<Player[]>(INITIAL_PLAYERS);
-  const [selectedPlayerId, setSelectedPlayerId] = useState<number>(INITIAL_PLAYERS[0].id);
-  const [matches, setMatches] = useState<Match[]>(INITIAL_MATCHES);
+  const [players, setPlayers] = useState(INITIAL_PLAYERS);
+  const [selectedPlayerId, setSelectedPlayerId] = useState(INITIAL_PLAYERS[0].id);
+  const [matches, setMatches] = useState<Match[]>([]);
   const [bets, setBets] = useState<Bet[]>([]);
-  const [selectedStake, setSelectedStake] = useState<number>(25);
-  const [playerName, setPlayerName] = useState('');
-  const [isLoadingOdds, setIsLoadingOdds] = useState(true);
-  const [dataSource, setDataSource] = useState<'live' | 'fallback'>('fallback');
-  const [apiMessage, setApiMessage] = useState('');
-  const [pulseAnim] = useState(new Animated.Value(1));
-  const [cardAnim] = useState(new Animated.Value(0));
+  const [tab, setTab] = useState<Tab>('matches');
+  const [stake, setStake] = useState(25);
+  const [stakeInput, setStakeInput] = useState('25');
+  const [friendName, setFriendName] = useState('');
+  const [status, setStatus] = useState('Loading real odds...');
 
   const currentPlayer = players.find((player) => player.id === selectedPlayerId) ?? players[0];
   const openMatches = matches.filter((match) => match.status === 'upcoming');
+  const pendingBets = bets.filter((bet) => bet.result === 'pending');
+  const prizePool = players.length * ENTRY_FEE;
 
-  const leaderboard = useMemo(() => {
-    return [...players].sort((a, b) => b.balance - a.balance);
-  }, [players]);
+  const leaderboard = useMemo(() => [...players].sort((a, b) => b.balance - a.balance), [players]);
 
   React.useEffect(() => {
-    const loadLiveMatches = async () => {
-      setIsLoadingOdds(true);
-
+    const loadOdds = async () => {
       try {
-        const response = await fetch(ODDS_API_URL, {
-          headers: { Accept: 'application/json' },
-        });
-        if (!response.ok) {
-          throw new Error(`Request failed: ${response.status}`);
-        }
+        const response = await fetch(ODDS_URL, { headers: { Accept: 'application/json' } });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
         const data = await response.json();
-        const liveMatches = (Array.isArray(data) ? data : []).map(toMatchFromApi).filter(Boolean) as Match[];
-        if (liveMatches.length > 0) {
-          setMatches(liveMatches.slice(0, 5));
-          setDataSource('live');
-          setApiMessage(`Loaded ${liveMatches.length} live matches`);
-        } else {
-          setMatches(INITIAL_MATCHES);
-          setDataSource('fallback');
-          setApiMessage('No live matches available');
-        }
+        const realMatches = (Array.isArray(data?.events) ? data.events : []).map(mapApiMatch).filter(Boolean) as Match[];
+        setMatches(realMatches.slice(0, 8));
+        setStatus(realMatches.length ? `${realMatches.length} real markets from ${data.source ?? 'odds feed'}` : 'No real markets available now');
       } catch (error) {
-        setMatches(INITIAL_MATCHES);
-        setDataSource('fallback');
-        setApiMessage('Live feed unavailable');
-      } finally {
-        setIsLoadingOdds(false);
+        setMatches([]);
+        setStatus('Real odds unavailable. Configure EXPO_PUBLIC_ODDS_API_KEY on the proxy.');
       }
     };
 
-    Animated.timing(cardAnim, {
-      toValue: 1,
-      duration: 700,
-      useNativeDriver: false,
-    }).start();
-
-    Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulseAnim, { toValue: 1.03, duration: 900, useNativeDriver: false }),
-        Animated.timing(pulseAnim, { toValue: 1, duration: 900, useNativeDriver: false }),
-      ])
-    ).start();
-
-    loadLiveMatches();
+    loadOdds();
   }, []);
 
-  const addPlayer = () => {
-    const trimmed = playerName.trim();
-    if (!trimmed) return;
-
-    const newPlayer: Player = {
-      id: Date.now(),
-      name: trimmed,
-      balance: STARTING_BANKROLL,
-    };
-
-    setPlayers((prev) => [...prev, newPlayer]);
-    setSelectedPlayerId(newPlayer.id);
-    setPlayerName('');
+  const selectStake = (value: number) => {
+    setStake(value);
+    setStakeInput(String(value));
   };
 
-  const placeBet = (match: Match, selection: BetSelection) => {
-    if (!currentPlayer) return;
-    if (selectedStake > currentPlayer.balance) {
-      alert('Not enough fake coins for that bet.');
+  const updateStake = (value: string) => {
+    const next = value.replace(/[^0-9]/g, '');
+    setStakeInput(next);
+    setStake(Number(next || 0));
+  };
+
+  const addFriend = () => {
+    const name = friendName.trim();
+    if (!name) return;
+
+    const player = { id: Date.now(), name, balance: STARTING_BALANCE, role: 'Invitee' };
+    setPlayers((current) => [...current, player]);
+    setSelectedPlayerId(player.id);
+    setFriendName('');
+  };
+
+  const placeBet = (match: Match, selection: Pick) => {
+    if (stake <= 0) {
+      Alert.alert('Invalid stake', 'Choose a stake greater than zero.');
+      return;
+    }
+    if (stake > currentPlayer.balance) {
+      Alert.alert('Not enough balance', 'Choose a smaller stake or switch player.');
       return;
     }
 
-    setPlayers((prev) => prev.map((player) => (player.id === currentPlayer.id ? { ...player, balance: player.balance - selectedStake } : player)));
-
-    setBets((prev) => [
-      ...prev,
-      {
-        id: Date.now(),
-        playerId: currentPlayer.id,
-        playerName: currentPlayer.name,
-        matchId: match.id,
-        home: match.home,
-        away: match.away,
-        selection,
-        stake: selectedStake,
-        result: 'pending',
-      },
-    ]);
+    const odds = match.odds[selection];
+    setPlayers((current) => current.map((player) => (
+      player.id === currentPlayer.id ? { ...player, balance: player.balance - stake } : player
+    )));
+    setBets((current) => [{
+      id: Date.now(),
+      playerId: currentPlayer.id,
+      playerName: currentPlayer.name,
+      matchId: match.id,
+      label: `${match.home} vs ${match.away}`,
+      selection,
+      stake,
+      odds,
+      potentialReturn: stake * odds,
+      result: 'pending',
+    }, ...current]);
   };
 
   const resolveNextMatch = () => {
@@ -194,501 +184,235 @@ export default function App() {
     if (!nextMatch) return;
 
     const roll = Math.random();
-    let result: BetSelection = 'home';
-    if (roll < 0.45) {
-      result = 'home';
-    } else if (roll < 0.7) {
-      result = 'draw';
-    } else {
-      result = 'away';
-    }
-
-    setMatches((prev) => prev.map((match) => (match.id === nextMatch.id ? { ...match, status: 'settled', result } : match)));
-
-    setBets((prev) => {
-      const updated = prev.map((bet) => {
-        if (bet.matchId !== nextMatch.id || bet.result !== 'pending') return bet;
-        const player = players.find((entry) => entry.id === bet.playerId);
-        if (!player) return bet;
-        const odds = nextMatch.odds[bet.selection];
-        const won = bet.selection === result;
-        if (won) {
-          const updatedBalance = Math.round(bet.stake * odds);
-          setPlayers((currentPlayers) => currentPlayers.map((entry) => (entry.id === player.id ? { ...entry, balance: entry.balance + updatedBalance } : entry)));
-          return { ...bet, result: 'won' };
-        }
-        return { ...bet, result: 'lost' };
-      });
-      return updated;
-    });
+    const result: Pick = roll < 0.45 ? 'home' : roll < 0.7 ? 'draw' : 'away';
+    setMatches((current) => current.map((match) => (
+      match.id === nextMatch.id ? { ...match, status: 'settled', result } : match
+    )));
+    setBets((current) => current.map((bet) => {
+      if (bet.matchId !== nextMatch.id || bet.result !== 'pending') return bet;
+      const won = bet.selection === result;
+      if (won) {
+        setPlayers((playersNow) => playersNow.map((player) => (
+          player.id === bet.playerId ? { ...player, balance: player.balance + Math.round(bet.potentialReturn) } : player
+        )));
+      }
+      return { ...bet, result: won ? 'won' : 'lost' };
+    }));
   };
+
+  const renderMatch = (match: Match) => (
+    <View key={match.id} style={styles.matchCard}>
+      <View style={styles.matchHeader}>
+        <View style={styles.grow}>
+          <Text style={styles.league}>{match.league}</Text>
+          <Text style={styles.matchTitle}>{match.home} vs {match.away}</Text>
+          <Text style={styles.meta}>{match.date} - {match.bookmaker} - updated {match.updatedAt}</Text>
+        </View>
+        <Text style={styles.openBadge}>Open</Text>
+      </View>
+      <View style={styles.oddsRow}>
+        {(['home', 'draw', 'away'] as Pick[]).map((pick) => (
+          <TouchableOpacity key={pick} style={styles.oddButton} onPress={() => placeBet(match, pick)}>
+            <Text style={styles.oddLabel}>{pickLabel(pick)}</Text>
+            <Text style={styles.oddValue}>{match.odds[pick].toFixed(2)}x</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+    </View>
+  );
+
+  const renderMatches = () => (
+    <View style={styles.panel}>
+      <View style={styles.sectionHeader}>
+        <View style={styles.grow}>
+          <Text style={styles.sectionTitle}>Matchs ouverts</Text>
+          <Text style={styles.meta}>Only real bookmaker odds are shown.</Text>
+        </View>
+        <TouchableOpacity style={styles.dangerButton} onPress={resolveNextMatch}>
+          <Text style={styles.dangerText}>Resultat</Text>
+        </TouchableOpacity>
+      </View>
+      <View style={styles.stakeRow}>
+        {STAKES.map((value) => (
+          <TouchableOpacity key={value} style={[styles.stakeButton, stake === value && styles.activeStake]} onPress={() => selectStake(value)}>
+            <Text style={[styles.stakeText, stake === value && styles.activeStakeText]}>{value}</Text>
+          </TouchableOpacity>
+        ))}
+        <TextInput value={stakeInput} onChangeText={updateStake} keyboardType="numeric" style={styles.stakeInput} />
+      </View>
+      {openMatches.map(renderMatch)}
+      {!openMatches.length && (
+        <View style={styles.emptyBox}>
+          <Text style={styles.emptyTitle}>No real odds loaded</Text>
+          <Text style={styles.emptyText}>Start the proxy with EXPO_PUBLIC_ODDS_API_KEY to load live bookmaker markets.</Text>
+        </View>
+      )}
+    </View>
+  );
+
+  const renderTickets = () => (
+    <View style={styles.panel}>
+      <Text style={styles.sectionTitle}>Tickets</Text>
+      {bets.map((bet) => (
+        <View key={bet.id} style={styles.ticketRow}>
+          <View style={styles.grow}>
+            <Text style={styles.goldText}>{bet.playerName}</Text>
+            <Text style={styles.ticketTitle}>{bet.label}</Text>
+            <Text style={styles.meta}>{pickLabel(bet.selection)} - {bet.odds.toFixed(2)}x</Text>
+          </View>
+          <View style={styles.right}>
+            <Text style={styles.ticketTitle}>{money(bet.stake)}</Text>
+            <Text style={[styles.result, styles[bet.result]]}>{bet.result}</Text>
+            <Text style={styles.meta}>Max {money(bet.potentialReturn)}</Text>
+          </View>
+        </View>
+      ))}
+      {!bets.length && <Text style={styles.emptyText}>Aucun ticket pour le moment.</Text>}
+    </View>
+  );
+
+  const renderFriends = () => (
+    <View style={styles.panel}>
+      <Text style={styles.sectionTitle}>Competition amis</Text>
+      <View style={styles.inputRow}>
+        <TextInput value={friendName} onChangeText={setFriendName} placeholder="Nom du joueur" placeholderTextColor="#7f90a5" style={styles.input} />
+        <TouchableOpacity style={styles.goldButton} onPress={addFriend}>
+          <Text style={styles.goldButtonText}>Ajouter</Text>
+        </TouchableOpacity>
+      </View>
+      {leaderboard.map((player, index) => (
+        <TouchableOpacity key={player.id} style={[styles.friendRow, player.id === selectedPlayerId && styles.activeFriend]} onPress={() => setSelectedPlayerId(player.id)}>
+          <View>
+            <Text style={styles.ticketTitle}>#{index + 1} {player.name}</Text>
+            <Text style={styles.meta}>{player.role} - entree {money(ENTRY_FEE)}</Text>
+          </View>
+          <Text style={styles.balance}>{money(player.balance)}</Text>
+        </TouchableOpacity>
+      ))}
+    </View>
+  );
 
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="light" />
       <ScrollView contentContainerStyle={styles.container}>
-        <Animated.View style={[styles.heroCard, { transform: [{ scale: pulseAnim }, { translateY: cardAnim.interpolate({ inputRange: [0, 1], outputRange: [16, 0] }) }] }]}>
-          <View style={styles.heroTopRow}>
-            <View style={styles.heroTextWrap}>
-              <Text style={styles.eyebrow}>Sportsbook • Premium</Text>
+        <View style={styles.hero}>
+          <View style={styles.heroTop}>
+            <View>
+              <Text style={styles.eyebrow}>Private sportsbook</Text>
               <Text style={styles.title}>Bet Taha</Text>
             </View>
-            <View style={styles.liveChip}>
-              <Text style={styles.liveChipText}>● Live</Text>
-            </View>
+            <Text style={styles.liveBadge}>Live</Text>
           </View>
-          <Text style={styles.subtitle}>Pick football fixtures with live-style odds, build your ticket, and chase the leaderboard.</Text>
-          <Text style={styles.statusText}>{isLoadingOdds ? 'Loading live markets…' : apiMessage || (dataSource === 'live' ? 'Live odds feed active' : 'Add your odds API key for live matches')}</Text>
-          <View style={styles.heroStatsRow}>
-            <View style={styles.heroStatBox}>
-              <Text style={styles.heroStatValue}>4</Text>
-              <Text style={styles.heroStatLabel}>Real fixtures</Text>
-            </View>
-            <View style={styles.heroStatBox}>
-              <Text style={styles.heroStatValue}>Top</Text>
-              <Text style={styles.heroStatLabel}>Odds</Text>
-            </View>
-            <View style={styles.heroStatBox}>
-              <Text style={styles.heroStatValue}>1000</Text>
-              <Text style={styles.heroStatLabel}>Starting bankroll</Text>
-            </View>
-          </View>
-        </Animated.View>
-
-        <Animated.View style={[styles.card, { opacity: cardAnim, transform: [{ translateY: cardAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }) }] }]}> 
-          <Text style={styles.cardTitle}>My bankroll</Text>
+          <Text style={styles.subtitle}>Competition de paris entre amis avec wallet, tickets, pot et classement.</Text>
+          <Text style={styles.status}>{status}</Text>
           <View style={styles.statsRow}>
             <View style={styles.statBox}>
-              <Text style={styles.statLabel}>Selected player</Text>
-              <Text style={styles.statValue}>{currentPlayer?.name}</Text>
+              <Text style={styles.statValue}>{money(currentPlayer.balance)}</Text>
+              <Text style={styles.meta}>Wallet actif</Text>
             </View>
             <View style={styles.statBox}>
-              <Text style={styles.statLabel}>Balance</Text>
-              <Text style={styles.statValue}>{currentPlayer?.balance} coins</Text>
+              <Text style={styles.statValue}>{money(prizePool)}</Text>
+              <Text style={styles.meta}>Pot amis</Text>
+            </View>
+            <View style={styles.statBox}>
+              <Text style={styles.statValue}>{pendingBets.length}</Text>
+              <Text style={styles.meta}>Tickets ouverts</Text>
             </View>
           </View>
-          <View style={styles.playerRow}>
+        </View>
+
+        <View style={styles.playerBar}>
+          <Text style={styles.meta}>Joueur actif</Text>
+          <Text style={styles.activePlayer}>{currentPlayer.name}</Text>
+          <View style={styles.chipRow}>
             {players.map((player) => (
-              <TouchableOpacity key={player.id} style={[styles.playerChip, selectedPlayerId === player.id && styles.playerChipActive]} onPress={() => setSelectedPlayerId(player.id)}>
-                <Text style={[styles.playerChipText, selectedPlayerId === player.id && styles.playerChipTextActive]}>{player.name}</Text>
+              <TouchableOpacity key={player.id} style={[styles.chip, player.id === selectedPlayerId && styles.activeChip]} onPress={() => setSelectedPlayerId(player.id)}>
+                <Text style={[styles.chipText, player.id === selectedPlayerId && styles.activeChipText]}>{player.name}</Text>
               </TouchableOpacity>
             ))}
           </View>
-          <View style={styles.inputRow}>
-            <TextInput value={playerName} onChangeText={setPlayerName} placeholder="Add a player" placeholderTextColor="#7ca7c8" style={styles.input} />
-            <TouchableOpacity style={styles.addButton} onPress={addPlayer}>
-              <Text style={styles.addButtonText}>Add</Text>
+        </View>
+
+        <View style={styles.tabs}>
+          {(['matches', 'tickets', 'friends'] as Tab[]).map((item) => (
+            <TouchableOpacity key={item} style={[styles.tab, tab === item && styles.activeTab]} onPress={() => setTab(item)}>
+              <Text style={[styles.tabText, tab === item && styles.activeTabText]}>{item === 'matches' ? 'Matchs' : item === 'tickets' ? 'Tickets' : 'Amis'}</Text>
             </TouchableOpacity>
-          </View>
-        </Animated.View>
-
-        <Animated.View style={[styles.card, { opacity: cardAnim, transform: [{ translateY: cardAnim.interpolate({ inputRange: [0, 1], outputRange: [24, 0] }) }] }]}>
-          <View style={styles.cardHeader}>
-            <View>
-              <Text style={styles.cardTitle}>Featured matches</Text>
-              <Text style={styles.sectionHint}>Live-style odds for the next fixtures</Text>
-            </View>
-            <TouchableOpacity style={styles.resolveButton} onPress={resolveNextMatch}>
-              <Text style={styles.resolveButtonText}>Resolve next</Text>
-            </TouchableOpacity>
-          </View>
-          <View style={styles.stakeRow}>
-            {STAKE_OPTIONS.map((stake) => (
-              <TouchableOpacity key={stake} style={[styles.stakeButton, selectedStake === stake && styles.stakeButtonActive]} onPress={() => setSelectedStake(stake)}>
-                <Text style={[styles.stakeText, selectedStake === stake && styles.stakeTextActive]}>{stake} coins</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          {openMatches.map((match) => (
-            <View key={match.id} style={styles.matchCard}>
-              <View style={styles.matchHeader}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.matchTitle}>{match.home} vs {match.away}</Text>
-                  <Text style={styles.matchDate}>{match.date}</Text>
-                </View>
-                <View style={styles.badge}><Text style={styles.badgeText}>Live bet</Text></View>
-              </View>
-              <View style={styles.oddsRow}>
-                <TouchableOpacity style={styles.oddCard} onPress={() => placeBet(match, 'home')}>
-                  <Text style={styles.oddLabel}>Home</Text>
-                  <Text style={styles.oddValue}>{match.odds.home.toFixed(2)}x</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.oddCard} onPress={() => placeBet(match, 'draw')}>
-                  <Text style={styles.oddLabel}>Draw</Text>
-                  <Text style={styles.oddValue}>{match.odds.draw.toFixed(2)}x</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.oddCard} onPress={() => placeBet(match, 'away')}>
-                  <Text style={styles.oddLabel}>Away</Text>
-                  <Text style={styles.oddValue}>{match.odds.away.toFixed(2)}x</Text>
-                </TouchableOpacity>
-              </View>
-              <View style={styles.betHint}><Text style={styles.betHintText}>Tap any odds to place a {selectedStake} coin bet</Text></View>
-            </View>
           ))}
-        </Animated.View>
+        </View>
 
-        <Animated.View style={[styles.card, { opacity: cardAnim, transform: [{ translateY: cardAnim.interpolate({ inputRange: [0, 1], outputRange: [28, 0] }) }] }]}>
-          <Text style={styles.cardTitle}>Leaderboard</Text>
-          {leaderboard.map((player, index) => (
-            <View key={player.id} style={styles.leaderRow}>
-              <Text style={styles.leaderName}>#{index + 1} {player.name}</Text>
-              <Text style={styles.leaderValue}>{player.balance} coins</Text>
-            </View>
-          ))}
-        </Animated.View>
-
-        <Animated.View style={[styles.card, { opacity: cardAnim, transform: [{ translateY: cardAnim.interpolate({ inputRange: [0, 1], outputRange: [32, 0] }) }] }]}>
-          <Text style={styles.cardTitle}>Recent bets</Text>
-          {bets.slice(-5).reverse().map((bet) => (
-            <View key={bet.id} style={styles.historyRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.historyName}>{bet.playerName}</Text>
-                <Text style={styles.historyMeta}>{bet.home} vs {bet.away}</Text>
-              </View>
-              <View style={{ alignItems: 'flex-end' }}>
-                <Text style={styles.historyValue}>{bet.stake} coins</Text>
-                <Text style={[styles.historyResult, bet.result === 'won' ? styles.won : bet.result === 'lost' ? styles.lost : styles.pending]}>{bet.result}</Text>
-              </View>
-            </View>
-          ))}
-        </Animated.View>
+        {tab === 'matches' && renderMatches()}
+        {tab === 'tickets' && renderTickets()}
+        {tab === 'friends' && renderFriends()}
       </ScrollView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: '#060b12',
-  },
-  container: {
-    padding: 16,
-    paddingBottom: 40,
-    backgroundColor: '#060b12',
-  },
-  heroCard: {
-    backgroundColor: '#0f1724',
-    borderRadius: 24,
-    padding: 20,
-    marginBottom: 14,
-    borderWidth: 1,
-    borderColor: 'rgba(255,138,91,0.22)',
-    shadowColor: '#ff8a5b',
-    shadowOpacity: 0.2,
-    shadowRadius: 14,
-    shadowOffset: { width: 0, height: 8 },
-  },
-  heroTopRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  heroTextWrap: {
-    gap: 6,
-    flex: 1,
-  },
-  eyebrow: {
-    color: '#4dd4b8',
-    fontWeight: '700',
-    textTransform: 'uppercase',
-    letterSpacing: 1.2,
-    fontSize: 11,
-  },
-  title: {
-    color: '#f3f7ff',
-    fontSize: 30,
-    fontWeight: '800',
-  },
-  subtitle: {
-    color: '#8cb4d9',
-    fontSize: 14,
-    lineHeight: 20,
-    marginBottom: 6,
-  },
-  statusText: {
-    color: '#4dd4b8',
-    fontSize: 12,
-    fontWeight: '700',
-    marginBottom: 10,
-  },
-  liveChip: {
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 999,
-    backgroundColor: 'rgba(255,138,91,0.16)',
-  },
-  liveChipText: {
-    color: '#ff8a5b',
-    fontWeight: '700',
-    fontSize: 12,
-  },
-  heroStatsRow: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  heroStatBox: {
-    flex: 1,
-    backgroundColor: '#111c2c',
-    borderRadius: 12,
-    padding: 10,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.06)',
-  },
-  heroStatValue: {
-    color: '#f3f7ff',
-    fontSize: 14,
-    fontWeight: '800',
-    marginBottom: 2,
-  },
-  heroStatLabel: {
-    color: '#8cb4d9',
-    fontSize: 11,
-  },
-  card: {
-    backgroundColor: '#0f1724',
-    borderRadius: 20,
-    padding: 16,
-    marginBottom: 14,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.09)',
-  },
-  cardTitle: {
-    color: '#f3f7ff',
-    fontSize: 18,
-    fontWeight: '700',
-    marginBottom: 2,
-  },
-  sectionHint: {
-    color: '#8cb4d9',
-    fontSize: 12,
-    marginBottom: 10,
-  },
-  statsRow: {
-    flexDirection: 'row',
-    gap: 10,
-    marginBottom: 10,
-  },
-  statBox: {
-    flex: 1,
-    backgroundColor: '#15324f',
-    borderRadius: 14,
-    padding: 12,
-  },
-  statLabel: {
-    color: '#8cb4d9',
-    fontSize: 12,
-    marginBottom: 4,
-  },
-  statValue: {
-    color: '#f3f7ff',
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  playerRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    marginBottom: 10,
-  },
-  playerChip: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    backgroundColor: '#15324f',
-    borderRadius: 999,
-  },
-  playerChipActive: {
-    backgroundColor: '#4dd4b8',
-  },
-  playerChipText: {
-    color: '#f3f7ff',
-    fontWeight: '600',
-  },
-  playerChipTextActive: {
-    color: '#07131f',
-  },
-  inputRow: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  input: {
-    flex: 1,
-    backgroundColor: '#0c1b2a',
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    color: '#f3f7ff',
-  },
-  addButton: {
-    backgroundColor: '#4dd4b8',
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    justifyContent: 'center',
-  },
-  addButtonText: {
-    color: '#07131f',
-    fontWeight: '700',
-  },
-  cardHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 10,
-  },
-  resolveButton: {
-    backgroundColor: '#ff8a5b',
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    shadowColor: '#ff8a5b',
-    shadowOpacity: 0.25,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 4 },
-  },
-  resolveButtonText: {
-    color: '#fff',
-    fontWeight: '700',
-    fontSize: 12,
-  },
-  stakeRow: {
-    flexDirection: 'row',
-    gap: 8,
-    marginBottom: 12,
-  },
-  stakeButton: {
-    flex: 1,
-    backgroundColor: '#15324f',
-    borderRadius: 10,
-    paddingVertical: 8,
-    alignItems: 'center',
-  },
-  stakeButtonActive: {
-    backgroundColor: '#4dd4b8',
-  },
-  stakeText: {
-    color: '#f3f7ff',
-    fontWeight: '700',
-  },
-  stakeTextActive: {
-    color: '#07131f',
-  },
-  matchCard: {
-    backgroundColor: '#13253c',
-    borderRadius: 16,
-    padding: 12,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.06)',
-  },
-  matchHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 10,
-  },
-  matchTitle: {
-    color: '#f3f7ff',
-    fontSize: 15,
-    fontWeight: '700',
-    flex: 1,
-  },
-  matchDate: {
-    color: '#8cb4d9',
-    fontSize: 12,
-    marginTop: 2,
-  },
-  badge: {
-    backgroundColor: 'rgba(255,138,91,0.18)',
-    borderRadius: 999,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-  },
-  badgeText: {
-    color: '#ff8a5b',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  oddsRow: {
-    flexDirection: 'row',
-    gap: 8,
-    marginBottom: 8,
-  },
-  oddCard: {
-    flex: 1,
-    backgroundColor: '#0f2237',
-    borderRadius: 12,
-    paddingVertical: 10,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
-  },
-  oddLabel: {
-    color: '#8cb4d9',
-    fontSize: 11,
-    marginBottom: 2,
-    textTransform: 'uppercase',
-  },
-  oddValue: {
-    color: '#f3f7ff',
-    fontSize: 16,
-    fontWeight: '800',
-  },
-  betHint: {
-    alignItems: 'center',
-  },
-  betHintText: {
-    color: '#8cb4d9',
-    fontSize: 12,
-  },
-  leaderRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255,255,255,0.08)',
-  },
-  leaderName: {
-    color: '#f3f7ff',
-    fontWeight: '600',
-  },
-  leaderValue: {
-    color: '#4dd4b8',
-    fontWeight: '700',
-  },
-  historyRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255,255,255,0.08)',
-  },
-  historyName: {
-    color: '#f3f7ff',
-    fontWeight: '600',
-  },
-  historyMeta: {
-    color: '#8cb4d9',
-    fontSize: 12,
-    marginTop: 2,
-  },
-  historyValue: {
-    color: '#f3f7ff',
-    fontWeight: '700',
-  },
-  historyResult: {
-    fontSize: 12,
-    textTransform: 'capitalize',
-    marginTop: 2,
-  },
-  won: {
-    color: '#4dd4b8',
-  },
-  lost: {
-    color: '#ff5d73',
-  },
-  pending: {
-    color: '#8cb4d9',
-  },
+  safeArea: { flex: 1, backgroundColor: '#071018' },
+  container: { padding: 16, paddingBottom: 40, backgroundColor: '#071018' },
+  hero: { backgroundColor: '#101923', borderRadius: 18, padding: 18, marginBottom: 12, borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)' },
+  heroTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 },
+  eyebrow: { color: '#f4c542', fontSize: 11, fontWeight: '900', textTransform: 'uppercase' },
+  title: { color: '#fff', fontSize: 34, fontWeight: '900' },
+  subtitle: { color: '#aab7c7', fontSize: 14, lineHeight: 20, marginBottom: 8 },
+  status: { color: '#46d7a5', fontSize: 12, fontWeight: '800', marginBottom: 12 },
+  liveBadge: { overflow: 'hidden', backgroundColor: '#d71920', color: '#fff', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 7, fontWeight: '900' },
+  statsRow: { flexDirection: 'row', gap: 8 },
+  statBox: { flex: 1, minHeight: 68, backgroundColor: '#182533', borderRadius: 12, padding: 10, justifyContent: 'center' },
+  statValue: { color: '#fff', fontSize: 15, fontWeight: '900', marginBottom: 3 },
+  playerBar: { backgroundColor: '#0e1721', borderRadius: 14, padding: 14, marginBottom: 12, borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)' },
+  activePlayer: { color: '#fff', fontSize: 20, fontWeight: '900', marginBottom: 10 },
+  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  chip: { backgroundColor: '#1a2735', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 8 },
+  activeChip: { backgroundColor: '#f4c542' },
+  chipText: { color: '#dce6f2', fontWeight: '800' },
+  activeChipText: { color: '#111820' },
+  tabs: { flexDirection: 'row', backgroundColor: '#0e1721', borderRadius: 12, padding: 4, marginBottom: 12 },
+  tab: { flex: 1, borderRadius: 9, paddingVertical: 10, alignItems: 'center' },
+  activeTab: { backgroundColor: '#fff' },
+  tabText: { color: '#9aaabc', fontWeight: '900' },
+  activeTabText: { color: '#111820' },
+  panel: { backgroundColor: '#0e1721', borderRadius: 14, padding: 14, borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)' },
+  sectionHeader: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 12 },
+  sectionTitle: { color: '#fff', fontSize: 18, fontWeight: '900', marginBottom: 4 },
+  grow: { flex: 1 },
+  meta: { color: '#9aaabc', fontSize: 12 },
+  dangerButton: { backgroundColor: '#d71920', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10 },
+  dangerText: { color: '#fff', fontWeight: '900' },
+  stakeRow: { flexDirection: 'row', gap: 8, marginBottom: 12 },
+  stakeButton: { flex: 1, minHeight: 42, backgroundColor: '#192737', borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  activeStake: { backgroundColor: '#f4c542' },
+  stakeText: { color: '#dce6f2', fontWeight: '900' },
+  activeStakeText: { color: '#111820' },
+  stakeInput: { width: 64, minHeight: 42, backgroundColor: '#192737', borderRadius: 10, color: '#fff', fontWeight: '900', paddingHorizontal: 10, textAlign: 'center' },
+  matchCard: { backgroundColor: '#142131', borderRadius: 12, padding: 12, marginBottom: 10 },
+  matchHeader: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, marginBottom: 10 },
+  league: { color: '#f4c542', fontSize: 11, fontWeight: '900', marginBottom: 3 },
+  matchTitle: { color: '#fff', fontSize: 16, fontWeight: '900' },
+  openBadge: { overflow: 'hidden', color: '#46d7a5', backgroundColor: 'rgba(70,215,165,0.15)', borderRadius: 999, paddingHorizontal: 9, paddingVertical: 5, fontSize: 11, fontWeight: '900' },
+  oddsRow: { flexDirection: 'row', gap: 8 },
+  oddButton: { flex: 1, minHeight: 66, backgroundColor: '#0b141e', borderRadius: 10, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)' },
+  oddLabel: { color: '#8999ac', fontSize: 11, fontWeight: '800', marginBottom: 4, textTransform: 'uppercase' },
+  oddValue: { color: '#fff', fontSize: 17, fontWeight: '900' },
+  emptyBox: { backgroundColor: '#142131', borderRadius: 12, padding: 16, borderWidth: 1, borderColor: 'rgba(244,197,66,0.28)' },
+  emptyTitle: { color: '#f4c542', fontSize: 15, fontWeight: '900', marginBottom: 6 },
+  emptyText: { color: '#aab7c7', fontSize: 13, lineHeight: 18 },
+  ticketRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 12, backgroundColor: '#142131', borderRadius: 12, padding: 12, marginBottom: 10 },
+  goldText: { color: '#f4c542', fontSize: 12, fontWeight: '900', marginBottom: 4 },
+  ticketTitle: { color: '#fff', fontWeight: '900' },
+  right: { alignItems: 'flex-end' },
+  result: { fontSize: 12, fontWeight: '900', textTransform: 'uppercase', marginTop: 4 },
+  pending: { color: '#f4c542' },
+  won: { color: '#46d7a5' },
+  lost: { color: '#ff5d73' },
+  inputRow: { flexDirection: 'row', gap: 8, marginBottom: 12 },
+  input: { flex: 1, backgroundColor: '#192737', borderRadius: 10, color: '#fff', paddingHorizontal: 12, minHeight: 44 },
+  goldButton: { backgroundColor: '#f4c542', borderRadius: 10, paddingHorizontal: 16, justifyContent: 'center' },
+  goldButtonText: { color: '#111820', fontWeight: '900' },
+  friendRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#142131', borderRadius: 12, padding: 12, marginBottom: 8, borderWidth: 1, borderColor: 'transparent' },
+  activeFriend: { borderColor: '#f4c542' },
+  balance: { color: '#46d7a5', fontWeight: '900' },
 });
