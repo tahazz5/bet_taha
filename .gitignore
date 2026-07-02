@@ -1,0 +1,12 @@
+# Node dependencies
+mobile/node_modules/
+
+# Expo and React Native build artifacts
+mobile/.expo/
+mobile/dist/
+
+# Local environment files
+mobile/.env
+
+# Logs
+*.log

@@ -12,23 +12,35 @@ npm run web
 
 La version actuelle d'Expo/React Native demande Node.js 20.19.4 ou plus.
 
-## Odds API
+## Backend
 
-Le serveur proxy lit la cle depuis `EXPO_PUBLIC_ODDS_API_KEY`.
+Le backend fournit l'API de cotes et le stockage du jeu dans `mobile/server.js`.
+
+### Démarrage
 
 ```bash
 cd mobile
-$env:EXPO_PUBLIC_ODDS_API_KEY="your_key"
-npm run server
+npm install
+EXPO_PUBLIC_ODDS_API_KEY="your_key" npm run server
 ```
 
-Sans cle API, l'app n'affiche pas de cotes. Elle demande de configurer le proxy pour charger les vraies cotes bookmaker.
+### Endpoints disponibles
+
+- `GET /api/odds?sport=<sport>&region=<region>` — proxifie The Odds API
+- `GET /api/health` — vérifie que le serveur est en ligne
+- `GET /api/state` — récupère l'état actuel du jeu
+- `POST /api/state` — remplace l'état du jeu et le persiste
+- `POST /api/state/reset` — réinitialise l'état du jeu aux valeurs par défaut
+
+### Exemple de configuration
+
+Le serveur proxy lit la clé depuis `EXPO_PUBLIC_ODDS_API_KEY`.
 
 Le proxy utilise The Odds API v4 avec :
 
-- sport par defaut : `soccer_epl`
-- region par defaut : `eu`
-- marche : `h2h`
+- sport par défaut : `soccer_epl`
+- region par défaut : `eu`
+- marché : `h2h`
 - format : `decimal`
 
 Exemple :
