@@ -1,0 +1,61 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+test('friend competitions have equal isolated budgets, private tickets and owner-only settlement', async () => {
+  process.env.DB_PATH = ':memory:';
+  const { server } = await import('../src/app.js');
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const request = async (path, token, body) => {
+    const response = await fetch(base + path, { method: body ? 'POST' : 'GET', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token || ''}` }, ...(body ? { body: JSON.stringify(body) } : {}) });
+    return { status: response.status, data: await response.json() };
+  };
+  try {
+    const owner = (await request('/api/register', null, { username: 'owner', password: 'secret123' })).data;
+    const friend = (await request('/api/register', null, { username: 'friend', password: 'secret123' })).data;
+    const outsider = (await request('/api/register', null, { username: 'outsider', password: 'secret123' })).data;
+    for (const startingBudget of [0, -50, 10.5, '100', 1000001]) assert.equal((await request('/api/groups', owner.token, { name: 'Invalid', startingBudget })).status, 400);
+    const created = await request('/api/groups', owner.token, { name: 'La bande', startingBudget: 500 });
+    assert.equal(created.status, 201);
+    const groupId = created.data.group.id;
+    assert.equal(created.data.group.members[0].competition_credits, 500);
+    const added = await request(`/api/groups/${groupId}/members`, owner.token, { username: 'friend' });
+    assert.equal(added.status, 201);
+    assert.deepEqual(added.data.group.members.map(member => member.competition_credits), [500, 500]);
+    assert.equal((await request(`/api/groups/${groupId}/members`, owner.token, { username: 'friend' })).status, 409);
+    assert.equal((await request(`/api/groups/${groupId}/members`, friend.token, { username: 'outsider' })).status, 403);
+    const body = { requestId: 'friends-ticket-001', groupId, betType: 'simple', stake: 100, selections: [{ matchId: 'real-madrid-barcelona', marketId: 'match-result', selectionId: 'home', odd: 1.82 }] };
+    assert.equal((await request('/api/tickets', outsider.token, body)).status, 403);
+    assert.equal((await request(`/api/groups/${groupId}/tickets`, outsider.token)).status, 403);
+    assert.equal((await request('/api/tickets', friend.token, { ...body, stake: 501 })).status, 400);
+    const placed = await request('/api/tickets', friend.token, body);
+    assert.equal(placed.status, 201);
+    assert.equal(placed.data.user.credits, 1000);
+    const ticketId = placed.data.tickets[0].id;
+    assert.equal(placed.data.tickets[0].group_id, groupId);
+    await request('/api/tickets', friend.token, body);
+    const group = (await request('/api/groups', friend.token)).data.groups.find(item => item.id === groupId);
+    assert.equal(group.members.find(member => member.id === friend.user.id).competition_credits, 400);
+    assert.equal(group.members.find(member => member.id === owner.user.id).competition_credits, 500);
+    assert.equal((await request(`/api/tickets/${ticketId}/settle`, friend.token, { outcome: 'won' })).status, 403);
+    const settled = await request(`/api/tickets/${ticketId}/settle`, owner.token, { outcome: 'won' });
+    assert.equal(settled.status, 200);
+    assert.equal(settled.data.ticket.payout, 182);
+    assert.equal((await request(`/api/tickets/${ticketId}/settle`, owner.token, { outcome: 'won' })).status, 409);
+    const updated = (await request('/api/groups', friend.token)).data.groups.find(item => item.id === groupId);
+    assert.equal(updated.members.find(member => member.id === friend.user.id).competition_credits, 582);
+    assert.equal((await request('/api/account', friend.token)).data.user.credits, 1000);
+    const second = await request('/api/tickets', friend.token, { ...body, requestId: 'friends-ticket-002' });
+    await request(`/api/tickets/${second.data.tickets[0].id}/settle`, owner.token, { outcome: 'void' });
+    const refunded = (await request('/api/groups', friend.token)).data.groups.find(item => item.id === groupId);
+    assert.equal(refunded.members.find(member => member.id === friend.user.id).competition_credits, 582);
+    const lost = await request('/api/tickets', friend.token, { ...body, requestId: 'friends-ticket-003' });
+    await request(`/api/tickets/${lost.data.tickets[0].id}/settle`, owner.token, { outcome: 'lost' });
+    const afterLoss = (await request('/api/groups', friend.token)).data.groups.find(item => item.id === groupId);
+    assert.equal(afterLoss.members.find(member => member.id === friend.user.id).competition_credits, 482);
+    const lateMember = await request(`/api/groups/${groupId}/members`, owner.token, { username: 'outsider' });
+    assert.equal(lateMember.data.group.members.find(member => member.id === outsider.user.id).competition_credits, 500);
+    const otherGroups = (await request('/api/groups', friend.token)).data.groups.filter(item => item.id !== groupId);
+    assert.equal(otherGroups[0].members.find(member => member.id === friend.user.id).competition_credits, 1000);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
